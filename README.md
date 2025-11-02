@@ -1,85 +1,57 @@
-# Ubuntu Ethernet Login Page Not Loading (Fixed – Docker Conflict)
+# Ubuntu Ethernet Login Page Not Loading (Fixed — Docker subnet conflict)
 
-so this was a weird one.
+## Symptoms
 
-in my college, when i connect the ethernet cable, a login page automatically opens (something like `gateway.iitj.ac.in`) where i have to put my username and password to access the internet.
+When connecting to campus ethernet, a login page (e.g. `gateway.iitj.ac.in`) normally opens for authentication. On Ubuntu the interface showed "Connected" but no sites loaded (even `google.com`) and manual attempts to reach the gateway returned "Destination Host Unreachable".
 
-on windows, it works perfectly.  
-on ubuntu, it _used_ to work fine too — until one random day, the login page just stopped opening.  
-the ethernet said “connected”, but any site (even google.com) gave **“This site can’t be reached”**.  
-i even tried opening the gateway IP manually — nothing. it just said “Destination Host Unreachable”.
+## Diagnosis
 
----
-
-## digging into it
-
-so after checking stuff like DNS and network status, we found something _super_ unexpected.
-
-when i ran:
+Run:
 
 ```bash
 ip route
-i noticed there was this line with docker0 and an IP range like 172.17.0.0/16.
-and when i pinged the gateway (which for our campus is 172.17.0.3), the response said:
+```
 
-nginx
-Copy code
+If you see a route like `172.17.0.0/16 dev docker0`, Docker's default network overlaps your campus gateway (for example `172.17.0.3`). Packets destined for the gateway were being routed into Docker's virtual network instead of to the campus gateway.
+
+Example symptom when pinging the gateway:
+
+```
 From 172.17.0.1 icmp_seq=1 Destination Host Unreachable
-that was the clue.
-docker had literally hijacked the same IP range that my college network was using 😭
-so instead of sending packets to the actual gateway, ubuntu was sending them inside docker’s virtual network.
-they never even left my laptop.
+```
 
-the fix
-so we basically told docker to stop using that range.
+## Fix
 
-step 1: open (or create) this file
+1. Edit (or create) the Docker daemon config:
 
-bash
-Copy code
+```bash
 sudo nano /etc/docker/daemon.json
-step 2: add this inside it (this changes docker’s internal network range):
+```
 
-json
-Copy code
+2. Add or update the `bip` setting to a non-conflicting subnet, for example:
+
+```json
 {
   "bip": "172.26.0.1/16"
 }
-(step 3: save and exit)
+```
 
-then run:
+3. Restart Docker and reconnect the ethernet:
 
-bash
-Copy code
+```bash
 sudo systemctl stop docker
 sudo systemctl stop docker.socket
 sudo systemctl daemon-reload
 sudo systemctl start docker
-and reconnect ethernet.
-
-instantly, the login page started working again ✨
-
-what actually happened (in simple words)
-docker creates its own virtual network called docker0
-
-by default, it uses the IP range 172.17.0.0/16
-
-our college network’s gateway also uses 172.17.x.x
-
-so ubuntu got confused and thought the gateway was part of docker’s network
-
-changing docker’s subnet fixed the conflict
-
-takeaway
-if your login page / intranet / proxy network stops working randomly on ubuntu,
-check if docker is stealing the same subnet:
-
-bash
-Copy code
-ip route
-if you see 172.17.0.0/16 dev docker0,
-change it in /etc/docker/daemon.json to something else like 172.26.0.1/16
-and restart docker.
-
-that’s literally it.
+# or: sudo systemctl restart docker
 ```
+
+Reconnect the ethernet cable; the login page should open again.
+
+## Explanation (short)
+
+Docker creates a `docker0` bridge using `172.17.0.0/16` by default. If your network/gateway uses the same range, the OS routes traffic into the Docker bridge instead of the real gateway. Changing Docker's bridge subnet removes the conflict.
+
+## Takeaway
+
+If your intranet/login page or proxy stops working on Ubuntu, check `ip route` for `docker0` overlapping your network. Change Docker's subnet in `/etc/docker/daemon.json` and restart Docker.
